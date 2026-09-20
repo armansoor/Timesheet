@@ -54,13 +54,39 @@
           </button>
         </div>
       </form>
+
+      <div class="pt-8 mt-6 border-t border-slate-100">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Saved weeks</h2>
+          <span id="storageNote" class="text-xs text-amber-600 font-medium"></span>
+        </div>
+        <div id="historyList" class="space-y-2"></div>
+        <p id="historyEmpty" class="text-sm text-slate-400">No saved weeks yet. Fill in your hours and hit Save.</p>
+      </div>
     </div>
   </main>
 
   <script>
     // --- 1. CONFIGURATION ---
+    // Paste your Google Apps Script Web App URL here to also sync to Google Sheets.
+    // Leave as-is and the app works fully offline, saving weeks in this browser.
     const GOOGLE_WEBAPP_URL = 'YOUR_GOOGLE_SCRIPT_URL_HERE'; // Replace with your URL from Step 1
+    const SHEETS_ENABLED = GOOGLE_WEBAPP_URL && !GOOGLE_WEBAPP_URL.includes('YOUR_GOOGLE_SCRIPT_URL_HERE');
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    // --- 1b. LOCAL STORAGE ---
+    const STORE_KEY = 'timesheet.weeks.v1';
+    const loadWeeks = () => {
+      try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; }
+      catch { return []; }
+    };
+    const saveWeeks = weeks => localStorage.setItem(STORE_KEY, JSON.stringify(weeks));
+    const weekId = () => {
+      const d = new Date();
+      const monday = new Date(d);
+      monday.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday of this week
+      return monday.toISOString().slice(0, 10);
+    };
     
     // --- 2. UI GENERATION ---
     const grid = document.getElementById('timesheetGrid');
@@ -130,49 +156,91 @@
       }
     }
 
-    // --- 4. DATABASE SAVE (Google Sheets) ---
+    // --- 4. SAVE (Google Sheets when configured, always local) ---
+    function renderHistory() {
+      const weeks = loadWeeks().sort((a, b) => b.id.localeCompare(a.id));
+      const list = document.getElementById('historyList');
+      const empty = document.getElementById('historyEmpty');
+      document.getElementById('storageNote').textContent =
+        SHEETS_ENABLED ? 'Syncing to Google Sheets + this browser' : 'Saving locally in this browser';
+
+      if (!weeks.length) {
+        list.innerHTML = '';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      list.innerHTML = weeks.map(w => `
+        <div class="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-xl px-4 py-3">
+          <div>
+            <div class="font-bold text-slate-700 text-sm">Week of ${w.id}</div>
+            <div class="text-xs text-slate-400">${days.map(d => `${d}: ${w.days[d] || '-'}`).join(' · ')}</div>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="font-black text-blue-600">${w.total}h</span>
+            <button type="button" onclick="deleteWeek('${w.id}')" class="text-xs text-slate-300 hover:text-red-500 font-bold">✕</button>
+          </div>
+        </div>`).join('');
+    }
+
+    function deleteWeek(id) {
+      if (!confirm('Delete this saved week?')) return;
+      saveWeeks(loadWeeks().filter(w => w.id !== id));
+      renderHistory();
+    }
+
     document.getElementById('timesheetForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      
+
       const btn = document.getElementById('saveBtn');
       const originalText = btn.innerHTML;
       btn.innerHTML = 'Saving...';
       btn.disabled = true;
 
       // Build data object
-      let payload = { Total: document.getElementById('weekTotal').innerText };
-      days.forEach(day => {
-        payload[day] = document.getElementById(`${day}-total-desk`).innerText;
-      });
+      const dayValues = {};
+      days.forEach(day => { dayValues[day] = document.getElementById(`${day}-total-desk`).innerText; });
+      const payload = { Total: document.getElementById('weekTotal').innerText, ...dayValues };
 
-      try {
-        await fetch(GOOGLE_WEBAPP_URL, {
-          method: 'POST',
-          mode: 'no-cors', // Essential for submitting to Google Apps Script without CORS errors
-          headers: { 'Content-Type': 'text/plain' },
-          body: JSON.stringify(payload)
-        });
-        
-        btn.innerHTML = '✓ Saved Successfully';
+      // Always save locally (upsert by week)
+      const weeks = loadWeeks().filter(w => w.id !== weekId());
+      weeks.push({ id: weekId(), total: payload.Total, days: dayValues, savedAt: new Date().toISOString() });
+      saveWeeks(weeks);
+      renderHistory();
+
+      // Optionally sync to Google Sheets
+      let synced = true;
+      if (SHEETS_ENABLED) {
+        try {
+          await fetch(GOOGLE_WEBAPP_URL, {
+            method: 'POST',
+            mode: 'no-cors', // Essential for submitting to Google Apps Script without CORS errors
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify(payload)
+          });
+        } catch (err) {
+          synced = false;
+        }
+      }
+
+      if (synced) {
+        btn.innerHTML = SHEETS_ENABLED ? '✓ Saved Successfully' : '✓ Saved Locally';
         btn.classList.replace('bg-blue-600', 'bg-emerald-500');
         btn.classList.replace('hover:bg-blue-700', 'hover:bg-emerald-600');
-        
-        setTimeout(() => {
-          btn.innerHTML = originalText;
-          btn.classList.replace('bg-emerald-500', 'bg-blue-600');
-          btn.classList.replace('hover:bg-emerald-600', 'hover:bg-blue-700');
-          btn.disabled = false;
-        }, 3000);
-      } catch (err) {
-        btn.innerHTML = 'Error Saving!';
-        btn.classList.replace('bg-blue-600', 'bg-red-500');
-        setTimeout(() => {
-          btn.innerHTML = originalText;
-          btn.classList.replace('bg-red-500', 'bg-blue-600');
-          btn.disabled = false;
-        }, 3000);
+      } else {
+        btn.innerHTML = 'Saved locally · Sheets sync failed';
+        btn.classList.replace('bg-blue-600', 'bg-amber-500');
       }
+
+      setTimeout(() => {
+        btn.innerHTML = originalText;
+        btn.classList.remove('bg-emerald-500', 'bg-amber-500', 'hover:bg-emerald-600');
+        btn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+        btn.disabled = false;
+      }, 3000);
     });
+
+    renderHistory();
   </script>
 </body>
 </html>
